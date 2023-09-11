@@ -1,0 +1,259 @@
+From b66647ab757c580b2532c117bd345d1bad3b2bd5 Mon Sep 17 00:00:00 2001
+From: "Chang S. Bae" <chang.seok.bae@intel.com>
+Date: Thu, 10 Feb 2022 14:46:01 -0800
+Subject: [PATCH 04/14] Prepare to handle thermal event
+
+Intel's new hardware supports Hardware Feedback Interface to provide CPU
+performance and energy efficiency information. Every update on this is
+delivered via thermal event interrupt. The thermal framework in the Linux
+kernel relays these notifications to userspace via a Netlink interface.
+
+When a CPU's performance and efficiency are zero, irqbalance needs to mask
+the CPU from interrupts. Introduce a new CPU mask to indicate banned CPUs
+for this.
+
+Before supporting this event handling, define functions. Their
+implementation will be on the following patches.
+
+This event is available only on x86-64 systems. And it can be subscribed
+with help of Netlink libraries. So check them before building it.
+
+Also add a new build option so users may opt out this support. Setting this
+option on other systems will result in a build failure.
+
+Signed-off-by: Chang S. Bae <chang.seok.bae@intel.com>
+---
+ Makefile.am  |  7 +++--
+ configure.ac | 22 ++++++++++++++
+ cputree.c    |  6 ++++
+ irqbalance.c |  4 +++
+ thermal.c    | 83 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ thermal.h    | 15 ++++++++++
+ 6 files changed, 135 insertions(+), 2 deletions(-)
+ create mode 100644 thermal.c
+ create mode 100644 thermal.h
+
+diff --git a/Makefile.am b/Makefile.am
+index 84e7d46..9181a34 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -27,7 +27,7 @@ EXTRA_DIST = COPYING autogen.sh misc/irqbalance.service misc/irqbalance.env
+ SUBDIRS = tests
+ 
+ UI_DIR = ui
+-AM_CFLAGS = $(LIBCAP_NG_CFLAGS) $(GLIB2_CFLAGS) $(NUMA_CFLAGS)
++AM_CFLAGS = $(LIBCAP_NG_CFLAGS) $(GLIB2_CFLAGS) $(NUMA_CFLAGS) $(LIBNL3_CFLAGS)
+ AM_CPPFLAGS = -I${top_srcdir} -W -Wall -Wshadow -Wformat -Wundef -D_GNU_SOURCE
+ noinst_HEADERS = bitmap.h constants.h cpumask.h irqbalance.h non-atomic.h \
+ 	types.h $(UI_DIR)/helpers.h $(UI_DIR)/irqbalance-ui.h $(UI_DIR)/ui.h
+@@ -39,7 +39,10 @@ endif
+ 
+ irqbalance_SOURCES = activate.c bitmap.c classify.c cputree.c irqbalance.c \
+ 	irqlist.c numa.c placement.c procinterrupts.c
+-irqbalance_LDADD = $(LIBCAP_NG_LIBS) $(GLIB2_LIBS) $(NUMA_LIBS)
++if THERMAL
++irqbalance_SOURCES += thermal.c
++endif
++irqbalance_LDADD = $(LIBCAP_NG_LIBS) $(GLIB2_LIBS) $(NUMA_LIBS) $(LIBNL3_LIBS)
+ if IRQBALANCEUI
+ irqbalance_ui_SOURCES = $(UI_DIR)/helpers.c $(UI_DIR)/irqbalance-ui.c \
+ 	$(UI_DIR)/ui.c
+diff --git a/configure.ac b/configure.ac
+index 32082fc..15532c1 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -36,6 +36,28 @@ AS_IF([test "x$has_ncursesw" = "xyes"], [
+   AC_SUBST([LIBS])
+ ])
+ 
++AC_CANONICAL_HOST
++
++AC_ARG_ENABLE(thermal,
++  AS_HELP_STRING([--enable-thermal], [enable thermal event support [default=auto]]),,
++  AS_IF([test x"$host_cpu" = x"x86_64"], [enable_thermal=yes], [enable_thermal=no])
++)
++
++AS_IF([test x"$enable_thermal" = x"yes" && test x"$host_cpu" != x"x86_64"],
++  AC_MSG_ERROR([no thermal events support on $host_cpu systems.]),
++)
++
++AS_IF([test x"$enable_thermal" = x"yes"],
++  [PKG_CHECK_MODULES([LIBNL3], [libnl-3.0 libnl-genl-3.0], [have_thermal=yes],
++    AC_MSG_NOTICE([no thermal event support as libnl-3.0 is unavailable.])
++  )]
++)
++
++AS_IF([test "x$have_thermal" = xyes],
++  AC_DEFINE([HAVE_THERMAL], 1, [Build irqbalance to support thermal events])
++)
++AM_CONDITIONAL([THERMAL], [test "x$have_thermal" = xyes])
++
+ AC_C_CONST
+ AC_C_INLINE
+ AM_PROG_CC_C_O
+diff --git a/cputree.c b/cputree.c
+index b716a8f..c250977 100644
+--- a/cputree.c
++++ b/cputree.c
+@@ -38,6 +38,7 @@
+ #include <glib.h>
+ 
+ #include "irqbalance.h"
++#include "thermal.h"
+ 
+ #ifdef HAVE_IRQBALANCEUI
+ extern char *banned_cpumask_from_ui;
+@@ -162,6 +163,11 @@ static void setup_banned_cpus(void)
+ 	cpumask_scnprintf(buffer, 4096, nohz_full);
+ 	log(TO_CONSOLE, LOG_INFO, "Adaptive-ticks CPUs: %s\n", buffer);
+ out:
++#ifdef HAVE_THERMAL
++	cpus_or(banned_cpus, banned_cpus, thermal_banned_cpus);
++	cpumask_scnprintf(buffer, 4096, thermal_banned_cpus);
++	log(TO_CONSOLE, LOG_INFO, "Thermal-banned CPUs: %s\n", buffer);
++#endif
+ 	cpumask_scnprintf(buffer, 4096, banned_cpus);
+ 	log(TO_CONSOLE, LOG_INFO, "Banned CPUs: %s\n", buffer);
+ }
+diff --git a/irqbalance.c b/irqbalance.c
+index e8d9ba9..c520c11 100644
+--- a/irqbalance.c
++++ b/irqbalance.c
+@@ -44,6 +44,7 @@
+ #include <sys/socket.h>
+ #endif
+ #include "irqbalance.h"
++#include "thermal.h"
+ 
+ volatile int keep_going = 1;
+ int one_shot_mode;
+@@ -703,6 +704,8 @@ int main(int argc, char** argv)
+ 		goto out;
+ 	}
+ #endif
++	if (init_thermal())
++		log(TO_ALL, LOG_WARNING, "Failed to initialize thermal events.\n");
+ 	main_loop = g_main_loop_new(NULL, FALSE);
+ 	last_interval = sleep_interval;
+ 	g_timeout_add_seconds(sleep_interval, scan, NULL);
+@@ -711,6 +714,7 @@ int main(int argc, char** argv)
+ 	g_main_loop_quit(main_loop);
+ 
+ out:
++	deinit_thermal();
+ 	free_object_tree();
+ 	free_cl_opts();
+ 	free(polscript);
+diff --git a/thermal.c b/thermal.c
+new file mode 100644
+index 0000000..308bc48
+--- /dev/null
++++ b/thermal.c
+@@ -0,0 +1,83 @@
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <stdio.h>
++
++#include <netlink/genl/genl.h>
++#include <netlink/genl/family.h>
++#include <netlink/genl/ctrl.h>
++
++#include "irqbalance.h"
++
++cpumask_t thermal_banned_cpus;
++
++static gboolean prepare_netlink(void)
++{
++	gboolean error = TRUE;
++
++	log(TO_ALL, LOG_ERR, "thermal: not yet implement to alloc memory for netlink.\n");
++	return error;
++}
++
++#define NL_FAMILY_NAME	"nlctrl"
++
++static gboolean establish_netlink(void)
++{
++	gboolean error = TRUE;
++
++	log(TO_ALL, LOG_ERR, "thermal: not yet implemented to establish netlink.\n");
++	return error;
++}
++
++static gboolean register_netlink_handler(nl_recvmsg_msg_cb_t handler __attribute__((unused)))
++{
++	gboolean error = TRUE;
++
++	log(TO_ALL, LOG_ERR, "thermal: not yet implemented to register thermal handler.\n");
++	return error;
++}
++
++static gboolean set_netlink_nonblocking(void)
++{
++	gboolean error = TRUE;
++
++	log(TO_ALL, LOG_ERR, "thermal: not yet implemented to set nonblocking socket.\n");
++	return error;
++}
++
++void deinit_thermal(void)
++{
++	return;
++}
++
++/*
++ * return value: TRUE with an error; otherwise, FALSE
++ */
++gboolean init_thermal(void)
++{
++	gboolean error;
++
++	error = prepare_netlink();
++	if (error)
++		goto err_out;
++
++	error = establish_netlink();
++	if (error)
++		goto err_out;
++
++	error = register_netlink_handler(NULL);
++	if (error)
++		goto err_out;
++
++	error = set_netlink_nonblocking();
++	if (error)
++		goto err_out;
++
++	return FALSE;
++err_out:
++	deinit_thermal();
++	return TRUE;
++}
+diff --git a/thermal.h b/thermal.h
+new file mode 100644
+index 0000000..657d54e
+--- /dev/null
++++ b/thermal.h
+@@ -0,0 +1,15 @@
++#ifndef __LINUX_THERMAL_H_
++#define __LINUX_THERMAL_H_
++
++#include <glib.h>
++
++#ifdef HAVE_THERMAL
++gboolean init_thermal(void);
++void deinit_thermal(void);
++extern cpumask_t thermal_banned_cpus;
++#else
++static inline gboolean init_thermal(void) { return FALSE; }
++#define deinit_thermal() do { } while (0)
++#endif
++
++#endif /* __LINUX_THERMAL_H_ */
+-- 
+2.33.1
+

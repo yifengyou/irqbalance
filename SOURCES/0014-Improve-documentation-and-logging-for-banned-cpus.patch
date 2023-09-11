@@ -1,0 +1,72 @@
+From cfb15f0bb95ebfd4357708eae42febe9f2121fba Mon Sep 17 00:00:00 2001
+From: Tao Liu <ltao@redhat.com>
+Date: Wed, 13 Jul 2022 17:11:40 +0800
+Subject: [PATCH 14/14] Improve documentation and logging for banned cpus
+
+This patch have no functional modification. Just improve the doc and log
+for isolcpu, nohz_full and numa node banning cpus, for providing more
+info for users.
+
+Signed-off-by: Tao Liu <ltao@redhat.com>
+---
+ cputree.c    | 6 +++---
+ irqbalance.1 | 2 +-
+ placement.c  | 6 +++++-
+ 3 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/cputree.c b/cputree.c
+index c250977..eb1981e 100644
+--- a/cputree.c
++++ b/cputree.c
+@@ -159,14 +159,14 @@ static void setup_banned_cpus(void)
+ 	cpus_or(banned_cpus, nohz_full, isolated_cpus);
+ 
+ 	cpumask_scnprintf(buffer, 4096, isolated_cpus);
+-	log(TO_CONSOLE, LOG_INFO, "Isolated CPUs: %s\n", buffer);
++	log(TO_CONSOLE, LOG_INFO, "Prevent irq assignment to these isolated CPUs: %s\n", buffer);
+ 	cpumask_scnprintf(buffer, 4096, nohz_full);
+-	log(TO_CONSOLE, LOG_INFO, "Adaptive-ticks CPUs: %s\n", buffer);
++	log(TO_CONSOLE, LOG_INFO, "Prevent irq assignment to these adaptive-ticks CPUs: %s\n", buffer);
+ out:
+ #ifdef HAVE_THERMAL
+ 	cpus_or(banned_cpus, banned_cpus, thermal_banned_cpus);
+ 	cpumask_scnprintf(buffer, 4096, thermal_banned_cpus);
+-	log(TO_CONSOLE, LOG_INFO, "Thermal-banned CPUs: %s\n", buffer);
++	log(TO_CONSOLE, LOG_INFO, "Prevent irq assignment to these thermal-banned CPUs: %s\n", buffer);
+ #endif
+ 	cpumask_scnprintf(buffer, 4096, banned_cpus);
+ 	log(TO_CONSOLE, LOG_INFO, "Banned CPUs: %s\n", buffer);
+diff --git a/irqbalance.1 b/irqbalance.1
+index 361faea..4c75362 100644
+--- a/irqbalance.1
++++ b/irqbalance.1
+@@ -167,7 +167,7 @@ Same as --debug.
+ .B IRQBALANCE_BANNED_CPUS
+ Provides a mask of CPUs which irqbalance should ignore and never assign interrupts to.
+ If not specified, irqbalance use mask of isolated and adaptive-ticks CPUs on the
+-system as the default value.
++system as the default value. The "isolcpus=" boot parameter specifies the isolated CPUs. The "nohz_full=" boot parameter specifies the adaptive-ticks CPUs. By default, no CPU will be an isolated or adaptive-ticks CPU.
+ This is a hexmask without the leading ’0x’. On systems with large numbers of
+ processors, each group of eight hex digits is separated by a comma ’,’. i.e.
+ ‘export IRQBALANCE_BANNED_CPUS=fc0‘ would prevent irqbalance from assigning irqs
+diff --git a/placement.c b/placement.c
+index 17a9f2e..9fde8cb 100644
+--- a/placement.c
++++ b/placement.c
+@@ -135,8 +135,12 @@ static void place_irq_in_node(struct irq_info *info, void *data __attribute__((u
+ 		 * Need to make sure this node is elligible for migration
+ 		 * given the banned cpu list
+ 		 */
+-		if (!cpus_intersects(irq_numa_node(info)->mask, unbanned_cpus))
++		if (!cpus_intersects(irq_numa_node(info)->mask, unbanned_cpus)) {
++			log(TO_CONSOLE, LOG_WARNING, "There is no suitable CPU in node:%d.\n", irq_numa_node(info)->number);
++			log(TO_CONSOLE, LOG_WARNING, "Irqbalance dispatch irq:%d to other node.\n", info->irq);
+ 			goto find_placement;
++		}
++
+ 		/*
+ 		 * This irq belongs to a device with a preferred numa node
+ 		 * put it on that node
+-- 
+2.33.1
+

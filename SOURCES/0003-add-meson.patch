@@ -1,0 +1,96 @@
+From 378d4707c26acf05e551219d8b09ddf440bdba2a Mon Sep 17 00:00:00 2001
+From: Rosen Penev <rosenp@gmail.com>
+Date: Fri, 10 Jun 2022 23:14:27 -0700
+Subject: [PATCH 03/14] add meson
+
+Simpler build system. Placing in contrib for now.
+
+Signed-off-by: Rosen Penev <rosenp@gmail.com>
+---
+ contrib/README            |  2 ++
+ contrib/meson.build       | 45 +++++++++++++++++++++++++++++++++++++++
+ contrib/meson_options.txt | 11 ++++++++++
+ 3 files changed, 58 insertions(+)
+ create mode 100644 contrib/README
+ create mode 100644 contrib/meson.build
+ create mode 100644 contrib/meson_options.txt
+
+diff --git a/contrib/README b/contrib/README
+new file mode 100644
+index 0000000..2158dac
+--- /dev/null
++++ b/contrib/README
+@@ -0,0 +1,2 @@
++This directory contains meson build instructions for irqbalance. This is here to see if there is any interest from
++the general community.
+diff --git a/contrib/meson.build b/contrib/meson.build
+new file mode 100644
+index 0000000..d813233
+--- /dev/null
++++ b/contrib/meson.build
+@@ -0,0 +1,45 @@
++project('irqbalance', 'c', version: '1.9.0', default_options: ['warning_level=1'])
++cc = meson.get_compiler('c')
++
++glib_dep = dependency('glib-2.0')
++m_dep = cc.find_library('m', required: false)
++capng_dep = dependency('libcap-ng', required: get_option('capng'))
++ncurses_dep = dependency('curses', required: get_option('ui'))
++systemd_dep = dependency('libsystemd', required: get_option('systemd'))
++
++cdata = configuration_data()
++cdata.set('HAVE_GETOPT_LONG', cc.has_function('getopt_long'))
++cdata.set('HAVE_IRQBALANCEUI', ncurses_dep.found())
++cdata.set('HAVE_NUMA_H', cc.has_header('numa.h'))
++cdata.set('HAVE_LIBCAP_NG', capng_dep.found())
++cdata.set('HAVE_LIBSYSTEMD', systemd_dep.found())
++cdata.set_quoted('VERSION', meson.project_version())
++cfile = configure_file(output: 'config.h', configuration: cdata)
++
++if cdata.get('HAVE_IRQBALANCEUI')
++  add_project_arguments('-D_GNU_SOURCE', language: 'c')
++
++  executable(
++    'irqbalance-ui',
++    '../ui/helpers.c',
++    '../ui/irqbalance-ui.c',
++    '../ui/ui.c',
++    dependencies: [glib_dep, ncurses_dep],
++    install: true,
++  )
++endif
++
++executable(
++  'irqbalance',
++  '../activate.c',
++  '../bitmap.c',
++  '../classify.c',
++  '../cputree.c',
++  '../irqbalance.c',
++  '../irqlist.c',
++  '../numa.c',
++  '../placement.c',
++  '../procinterrupts.c',
++  dependencies: [glib_dep, m_dep, capng_dep, systemd_dep],
++  install: true,
++)
+diff --git a/contrib/meson_options.txt b/contrib/meson_options.txt
+new file mode 100644
+index 0000000..3515dc3
+--- /dev/null
++++ b/contrib/meson_options.txt
+@@ -0,0 +1,11 @@
++option('capng', type : 'feature',
++  description : 'Build with libcap-ng support',
++)
++
++option('systemd', type : 'feature',
++  description : 'Build with systemd support',
++)
++
++option('ui', type : 'feature',
++  description : 'Build the UI component',
++)
+-- 
+2.33.1
+

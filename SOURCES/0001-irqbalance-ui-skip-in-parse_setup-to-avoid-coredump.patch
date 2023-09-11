@@ -1,0 +1,64 @@
+From c8d1fff0f16ad906cca153a22faac11516ccc0dd Mon Sep 17 00:00:00 2001
+From: Liu Chao <liuchao173@huawei.com>
+Date: Mon, 18 Jul 2022 16:54:53 +0800
+Subject: [PATCH] irqbalance-ui: skip ',' in parse_setup to avoid coredump
+
+When processing the ',' in hex_to_bitmap, it returns '0000\ 0' directly.
+The return value will be freed in parse_setup, but it is not requested
+through malloc.
+
+Fixes: 85d37098a551 ("Fix several memleak problems found by covscan")
+
+And it treat ',' as "0000", which cause irqbalance-ui will display wrong
+Banned CPU numbers.
+
+For example:
+# IRQBALANCE_BANNED_CPUS="00000002,00000000,00000000" ./irqbalance
+or
+# IRQBALANCE_BANNED_CPULIST="65" ./irqbalance
+
+# ./irqbalance-ui
+Banned CPU numbers: 73
+
+Fixes: 76d1c9d73935 ("Add main user interface files")
+
+Signed-off-by: Liu Chao <liuchao173@huawei.com>
+---
+ ui/irqbalance-ui.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/ui/irqbalance-ui.c b/ui/irqbalance-ui.c
+index 47b6c88..b7f9b62 100644
+--- a/ui/irqbalance-ui.c
++++ b/ui/irqbalance-ui.c
+@@ -142,7 +142,7 @@ try_again:
+ void parse_setup(char *setup_data)
+ {
+ 	char *token, *ptr;
+-	int i,j;
++	int i,j, cpu = 0;
+ 	char *copy;
+ 	irq_t *new_irq = NULL;
+ 	if((setup_data == NULL) || (strlen(setup_data) == 0)) return;
+@@ -179,14 +179,17 @@ void parse_setup(char *setup_data)
+ 	if(strncmp(token, "BANNED", strlen("BANNED"))) goto out;
+ 	token = strtok_r(NULL, " ", &ptr);
+ 	for(i = strlen(token) - 1; i >= 0; i--) {
++		if (token[i] == ',')
++			continue;
+ 		char *map = hex_to_bitmap(token[i]);
+ 		for(j = 3; j >= 0; j--) {
+ 			if(map[j] == '1') {
+ 				uint64_t *banned_cpu = malloc(sizeof(uint64_t));
+-				*banned_cpu = (4 * (strlen(token) - (i + 1)) + (4 - (j + 1)));
++				*banned_cpu = cpu;
+ 				setup.banned_cpus = g_list_append(setup.banned_cpus,
+ 								banned_cpu);
+ 			}
++			cpu++;
+ 		}
+ 		free(map);
+ 	
+-- 
+2.33.1
+

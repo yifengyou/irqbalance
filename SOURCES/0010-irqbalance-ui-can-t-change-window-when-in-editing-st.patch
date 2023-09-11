@@ -1,0 +1,347 @@
+From b65faa2b658e3cf4edf6d39e4bb1e103a47ac0de Mon Sep 17 00:00:00 2001
+From: Liu Chao <liuchao173@huawei.com>
+Date: Thu, 30 Jun 2022 10:19:00 +0800
+Subject: [PATCH 10/14] irqbalance-ui: can't change window when in editing
+ state
+
+when invoking setup_irqs in settings or invoking settings in setup_irqs, it
+doesn't break but enters another while loop.
+For example:
+ # gdb program `pidof irqbalance-ui`
+ (gdb) bt
+ #0  0x0000ffffb0dcc7b0 in poll () from /usr/lib64/libc.so.6
+ #1  0x0000ffffb0e9097c in _nc_timed_wait () from /usr/lib64/libtinfo.so.6
+ #2  0x0000ffffb0ecc154 in _nc_wgetch () from /usr/lib64/libncursesw.so.6
+ #3  0x0000ffffb0eccb18 in wgetch () from /usr/lib64/libncursesw.so.6
+ #4  0x00000000004045d4 in setup_irqs () at ui/ui.c:637
+ #5  0x0000000000404084 in settings () at ui/ui.c:614
+ #6  0x0000000000404084 in settings () at ui/ui.c:614
+ #7  0x0000000000404084 in settings () at ui/ui.c:614
+ #8  0x0000000000404084 in settings () at ui/ui.c:614
+ #9  0x0000000000404084 in settings () at ui/ui.c:614
+ #10 0x0000000000404084 in settings () at ui/ui.c:614
+ #11 0x0000000000404084 in settings () at ui/ui.c:614
+ #12 0x0000000000401fac in key_loop (data=<optimized out>) at ui/irqbalance-ui.c:387
+ #13 0x0000ffffb105371c in ?? () from /usr/lib64/libglib-2.0.so.0
+ #14 0x0000ffffb1052a84 in g_main_context_dispatch () from /usr/lib64/libglib-2.0.so.0
+ #15 0x0000ffffb1052e38 in ?? () from /usr/lib64/libglib-2.0.so.0
+ #16 0x0000ffffb1053188 in g_main_loop_run () from /usr/lib64/libglib-2.0.so.0
+ #17 0x000000000040196c in main (argc=<optimized out>, argv=<optimized out>) at ui/irqbalance-ui.c:445
+
+Signed-off-by: Liu Chao <liuchao173@huawei.com>
+---
+ ui/irqbalance-ui.c |  39 ++++++++++---
+ ui/ui.c            | 137 ++++++++++++---------------------------------
+ ui/ui.h            |   2 +-
+ 3 files changed, 69 insertions(+), 109 deletions(-)
+
+diff --git a/ui/irqbalance-ui.c b/ui/irqbalance-ui.c
+index 3ad3553..89ed94a 100644
+--- a/ui/irqbalance-ui.c
++++ b/ui/irqbalance-ui.c
+@@ -16,11 +16,16 @@
+ #include "helpers.h"
+ 
+ 
++enum states {
++	STATE_TREE,
++	STATE_SETTINGS,
++	STATE_SETUP_IRQS
++};
++int state;
+ int irqbalance_pid = -1;
+ GList *tree = NULL;
+ setup_t setup;
+ GMainLoop *main_loop;
+-int is_tree = 1;
+ static int default_bufsz = 8192;
+ 
+ struct msghdr * create_credentials_msg()
+@@ -359,7 +364,7 @@ gboolean rescan_tree(gpointer data __attribute__((unused)))
+ 	parse_setup(setup_data);
+ 	char *irqbalance_data = get_data(STATS);
+ 	parse_into_tree(irqbalance_data);
+-	if(is_tree) {
++	if(state == STATE_TREE) {
+ 		display_tree();
+ 	}
+ 	free(setup_data);
+@@ -375,16 +380,35 @@ gboolean key_loop(gpointer data __attribute__((unused)))
+ 		close_window(0);
+ 		break;
+ 	case KEY_F(3):
+-		is_tree = 1;
+-		display_tree();
++		if (state == STATE_SETTINGS || state == STATE_SETUP_IRQS) {
++			state = STATE_TREE;
++			display_tree();
++		}
+ 		break;
+ 	case KEY_F(4):
+-		is_tree = 0;
++		if (state == STATE_TREE || state == STATE_SETUP_IRQS) {
++			state = STATE_SETTINGS;
++			settings();
++		}
+ 		settings();
+ 		break;
+ 	case KEY_F(5):
+-		is_tree = 0;
+-		setup_irqs();
++		if (state == STATE_TREE || state == STATE_SETTINGS) {
++			state = STATE_SETUP_IRQS;
++			setup_irqs();
++		}
++		break;
++	case 'c':
++		if (state == STATE_SETTINGS)
++			handle_cpu_banning();
++		break;
++	case 'i':
++		if (state == STATE_SETUP_IRQS)
++			handle_irq_banning();
++		break;
++	case 's':
++		if (state == STATE_SETTINGS)
++			handle_sleep_setting();
+ 		break;
+ 	default:
+ 		break;
+@@ -437,6 +461,7 @@ int main(int argc, char **argv)
+ 		}
+ 	}
+ 
++	state = STATE_TREE;
+ 	init();
+ 
+ 	main_loop = g_main_loop_new(NULL, FALSE);
+diff --git a/ui/ui.c b/ui/ui.c
+index beafe3a..1e211de 100644
+--- a/ui/ui.c
++++ b/ui/ui.c
+@@ -273,7 +273,8 @@ void handle_cpu_banning()
+ 			attrset(COLOR_PAIR(5));
+ 			mvprintw(LINES - 2, 1,
+ 				"Press <S> for changing sleep setup, <C> for CPU ban setup.  ");
+-			move(LINES - 1, COLS - 1);
++			show_frame();
++			show_footer();
+ 			refresh();
+ 			break;
+ 		case 's':
+@@ -287,8 +288,8 @@ void handle_cpu_banning()
+ 			attrset(COLOR_PAIR(5));
+ 			mvprintw(LINES - 2, 1,
+ 				"Press <S> for changing sleep setup, <C> for CPU ban setup.  ");
+-			attrset(COLOR_PAIR(3));
+-			move(LINES - 1, COLS - 1);
++			show_frame();
++			show_footer();
+ 			refresh();
+ 			char settings_string[1024] = "settings cpus \0";
+ 			for_each_cpu(all_cpus, get_new_cpu_ban_values, settings_string);
+@@ -302,16 +303,6 @@ void handle_cpu_banning()
+ 			processing = 0;
+ 			close_window(0);
+ 			break;
+-		case KEY_F(3):
+-			is_tree = 1;
+-			processing = 0;
+-			display_tree();
+-			break;
+-		case KEY_F(5):
+-			is_tree = 0;
+-			processing = 0;
+-			setup_irqs();
+-			break;
+ 		default:
+ 			break;
+ 		}
+@@ -475,7 +466,8 @@ void handle_irq_banning()
+ 			attrset(COLOR_PAIR(5));
+ 			mvprintw(LINES - 2, 1, "Press <I> for setting up IRQ banning.\
+ 				");
+-			move(LINES - 1, COLS - 1);
++			show_frame();
++			show_footer();
+ 			refresh();
+ 			break;
+ 		case 's':
+@@ -490,7 +482,8 @@ void handle_irq_banning()
+ 			mvprintw(LINES - 2, 1, "Press <I> for setting up IRQ banning.\
+ 				");
+ 			attrset(COLOR_PAIR(3));
+-			move(LINES - 1, COLS - 1);
++			show_frame();
++			show_footer();
+ 			refresh();
+ 			char settings_string[1024] = BAN_IRQS;
+ 			for_each_irq(all_irqs, get_new_irq_ban_values, settings_string);
+@@ -504,22 +497,35 @@ void handle_irq_banning()
+ 			processing = 0;
+ 			close_window(0);
+ 			break;
+-		case KEY_F(3):
+-			is_tree = 1;
+-			processing = 0;
+-			display_tree();
+-			break;
+-		case KEY_F(4):
+-			is_tree = 0;
+-			processing = 0;
+-			settings();
+-			break;
+ 		default:
+ 			break;
+ 		}
+ 	}
+ }
+ 
++void handle_sleep_setting()
++{
++	char info[128] = "Current sleep interval between rebalancing: \0";
++	uint8_t sleep_input_offset = strlen(info) + 3;
++	mvprintw(LINES - 1, 1, "Press ESC for discarding your input.\
++												");
++	attrset(COLOR_PAIR(0));
++	mvprintw(LINES - 2, 1, "			\
++												");
++	uint64_t new_sleep = get_valid_sleep_input(sleep_input_offset);
++	if(new_sleep != setup.sleep) {
++		setup.sleep = new_sleep;
++		char settings_data[128];
++		snprintf(settings_data, 128, "%s %" PRIu64, SET_SLEEP, new_sleep);
++		send_settings(settings_data);
++	}
++	attrset(COLOR_PAIR(5));
++	mvprintw(LINES - 2, 1, "Press <S> for changing sleep setup, <C> for CPU ban setup. ");
++	show_frame();
++	show_footer();
++	refresh();
++}
++
+ void init()
+ {
+ 	signal(SIGINT, close_window);
+@@ -563,60 +569,15 @@ void settings()
+ 	parse_setup(setup_data);
+ 
+ 	char info[128] = "Current sleep interval between rebalancing: \0";
+-	uint8_t sleep_input_offset = strlen(info) + 3;
+ 	snprintf(info + strlen(info), 128 - strlen(info), "%" PRIu64 "\n", setup.sleep);
+ 	attrset(COLOR_PAIR(1));
+ 	mvprintw(2, 3, "%s", info);
+ 	print_all_cpus();
+-
+-	int user_input = 1;
+-	while(user_input) {
+-		attrset(COLOR_PAIR(5));
+-		mvprintw(LINES - 2, 1,
+-				 "Press <S> for changing sleep setup, <C> for CPU ban setup. ");
+-		show_frame();
+-		show_footer();
+-		refresh();
+-		int c = getch();
+-		switch(c) {
+-		case 's': {
+-			mvprintw(LINES - 1, 1, "Press ESC for discarding your input.\
+-												");
+-			attrset(COLOR_PAIR(0));
+-			mvprintw(LINES - 2, 1, "			\
+-												");
+-			uint64_t new_sleep = get_valid_sleep_input(sleep_input_offset);
+-			if(new_sleep != setup.sleep) {
+-				setup.sleep = new_sleep;
+-				char settings_data[128];
+-				snprintf(settings_data, 128, "%s %" PRIu64, SET_SLEEP, new_sleep);
+-				send_settings(settings_data);
+-			}
+-			break;
+-		}
+-		case 'c':
+-			handle_cpu_banning();
+-			break;
+-		/* We need to include window changing options as well because the
+-		 * related char was eaten up by getch() already */
+-		case 'q':
+-			user_input = 0;
+-			close_window(0);
+-			break;
+-		case KEY_F(3):
+-			is_tree = 1;
+-			user_input = 0;
+-			display_tree();
+-			break;
+-		case KEY_F(5):
+-			is_tree = 0;
+-			user_input = 0;
+-			setup_irqs();
+-			break;
+-		default:
+-			break;
+-		}
+-	}
++	attrset(COLOR_PAIR(5));
++	mvprintw(LINES - 2, 1, "Press <S> for changing sleep setup, <C> for CPU ban setup. ");
++	show_frame();
++	show_footer();
++	refresh();
+ 	free(setup_data);
+ }
+ 
+@@ -631,32 +592,6 @@ void setup_irqs()
+ 	show_frame();
+ 	show_footer();
+ 	refresh();
+-
+-	int user_input = 1;
+-	while(user_input) {
+-		int c = getch();
+-		switch(c) {
+-		case 'i':
+-			handle_irq_banning();
+-			break;
+-		case 'q':
+-			user_input = 0;
+-			close_window(0);
+-			break;
+-		case KEY_F(3):
+-			is_tree = 1;
+-			user_input = 0;
+-			display_tree();
+-			break;
+-		case KEY_F(4):
+-			is_tree = 0;
+-			user_input = 0;
+-			settings();
+-			break;
+-		default:
+-			break;
+-		}
+-	}
+ }
+ 
+ void display_tree_node_irqs(irq_t *irq, void *data)
+diff --git a/ui/ui.h b/ui/ui.h
+index 0aa8280..ca2a3a6 100644
+--- a/ui/ui.h
++++ b/ui/ui.h
+@@ -13,7 +13,6 @@
+ 
+ extern GList *tree;
+ extern setup_t setup;
+-extern int is_tree;
+ 
+ void show_frame();
+ void show_footer();
+@@ -29,6 +28,7 @@ void display_banned_cpus();
+ int toggle_cpu(GList *cpu_list, int cpu_number);
+ void get_new_cpu_ban_values(cpu_ban_t *cpu, void *data);
+ void get_cpu();
++void handle_sleep_setting();
+ void handle_cpu_banning();
+ 
+ void copy_assigned_obj(int *number, void *data);
+-- 
+2.33.1
+

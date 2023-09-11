@@ -1,0 +1,13 @@
+diff --git a/misc/irqbalance.service b/misc/irqbalance.service
+index 0f79c3e..18c7e9b 100644
+--- a/misc/irqbalance.service
++++ b/misc/irqbalance.service
+@@ -7,7 +7,7 @@ ConditionCPUs=>1
+ 
+ [Service]
+ EnvironmentFile=-/usr/lib/irqbalance/defaults.env
+-EnvironmentFile=-/path/to/irqbalance.env
++EnvironmentFile=-/etc/sysconfig/irqbalance
+ ExecStart=/usr/sbin/irqbalance --foreground $IRQBALANCE_ARGS
+ ReadOnlyPaths=/
+ ReadWritePaths=/proc/irq
